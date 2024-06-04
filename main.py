@@ -6,12 +6,18 @@ import os
 from datetime import datetime
 from telegram import Bot, Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
+import logging
 
-# Google News API key
-API_KEY = "8724843704da412698fa529a6aa777bc"
+# Setup logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Telegram bot token
-BOT_TOKEN = "7461272183:AAFH-_dJYbcHwLGJ5HJiPcnNDGDcua4ucKw"
+# Load environment variables
+API_KEY = os.getenv("GOOGLE_NEWS_API_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # Path to the file where chat IDs will be stored
 CHAT_ID_FILE = "chat_ids.txt"
@@ -33,17 +39,24 @@ topics = [
     "Tech news"
 ]
 
+# Initialize requests session with retry strategy
+session = requests.Session()
+retry = Retry(connect=3, backoff_factor=0.5)
+adapter = HTTPAdapter(max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
+
 # Function to fetch news headlines from Google News API for a given topic
 def fetch_news(topic):
     url = f"https://newsapi.org/v2/everything?q={topic}&apiKey={API_KEY}"
-    response = requests.get(url)
+    response = session.get(url)
+    if response.status_code == 429:
+        logger.warning("Rate limit exceeded, sleeping for a while.")
+        time.sleep(60)  # Sleep for 1 minute if rate limit is exceeded
+        return []
     data = response.json()
     articles = data.get('articles', [])
-    headlines = []
-    for article in articles:
-        title = article.get('title', 'N/A')
-        source = article.get('url', 'N/A')
-        headlines.append({'title': title, 'source': source})
+    headlines = [{'title': article.get('title', 'N/A'), 'source': article.get('url', 'N/A')} for article in articles]
     return headlines
 
 # Function to shorten URLs
@@ -87,7 +100,7 @@ def send_news_to_telegram(chat_id=None):
     chat_ids = load_chat_ids()
     sent_urls = load_sent_urls()
     if not chat_ids and not chat_id:
-        print("No chat IDs found.")
+        logger.info("No chat IDs found.")
         return
 
     headlines = []
@@ -105,7 +118,7 @@ def send_news_to_telegram(chat_id=None):
     headlines = headlines[:5]
 
     if not headlines:
-        print("No new headlines found.")
+        logger.info("No new headlines found.")
         return
 
     message = ""
@@ -122,7 +135,7 @@ def send_news_to_telegram(chat_id=None):
         try:
             bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         except Exception as e:
-            print(f"Failed to send message to {chat_id}: {e}")
+            logger.error(f"Failed to send message to {chat_id}: {e}")
 
     # Save the new sent URLs to the file
     save_sent_urls(new_sent_urls)
@@ -146,11 +159,11 @@ def main():
     while True:
         try:
             send_news_to_telegram()
-            print(f"News sent at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"News sent at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             time.sleep(10800)  # Sleep for 3 hours (3 hours * 60 minutes * 60 seconds)
         except Exception as e:
-            print(f"Error: {e}")
-            continue
+            logger.error(f"Unhandled error: {e}", exc_info=True)
+            time.sleep(60)  # Sleep for 1 minute before retrying
 
     updater.idle()
 
